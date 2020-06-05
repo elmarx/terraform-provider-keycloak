@@ -42,25 +42,6 @@ func groupRolesId(realmId, groupId string) string {
 	return fmt.Sprintf("%s/%s", realmId, groupId)
 }
 
-func getMapOfRealmAndClientRoles(keycloakClient *keycloak.KeycloakClient, realmId string, roleIds []string) (map[string][]*keycloak.Role, error) {
-	roles := make(map[string][]*keycloak.Role)
-
-	for _, roleId := range roleIds {
-		role, err := keycloakClient.GetRole(realmId, roleId)
-		if err != nil {
-			return nil, err
-		}
-
-		if role.ClientRole {
-			roles[role.ClientId] = append(roles[role.ClientId], role)
-		} else {
-			roles["realm"] = append(roles["realm"], role)
-		}
-	}
-
-	return roles, nil
-}
-
 // given a group and a map of roles we already know about, fetch the roles we don't know about
 // `localRoles` is used as a cache to avoid unnecessary http requests
 func getMapOfRealmAndClientRolesFromGroup(keycloakClient *keycloak.KeycloakClient, group *keycloak.Group, localRoles map[string][]*keycloak.Role) (map[string][]*keycloak.Role, error) {
@@ -328,29 +309,4 @@ func resourceKeycloakGroupRolesImport(d *schema.ResourceData, _ interface{}) ([]
 	d.SetId(groupRolesId(parts[0], parts[1]))
 
 	return []*schema.ResourceData{d}, nil
-}
-
-func removeRoleFromSlice(slice []*keycloak.Role, index int) []*keycloak.Role {
-	slice[index] = slice[len(slice)-1]
-	return slice[:len(slice)-1]
-}
-
-func removeDuplicateRoles(one, two *map[string][]*keycloak.Role) {
-	for k := range *one {
-		for i1 := 0; i1 < len((*one)[k]); i1++ {
-			s1 := (*one)[k][i1]
-
-			for i2 := 0; i2 < len((*two)[k]); i2++ {
-				s2 := (*two)[k][i2]
-
-				if s1.Id == s2.Id {
-					(*one)[k] = removeRoleFromSlice((*one)[k], i1)
-					(*two)[k] = removeRoleFromSlice((*two)[k], i2)
-
-					i1--
-					break
-				}
-			}
-		}
-	}
 }
