@@ -42,34 +42,15 @@ func userRolesId(realmId, userId string) string {
 	return fmt.Sprintf("%s/%s", realmId, userId)
 }
 
-// convert the UserRoleMapping struct into a realm-/client-id-to-role map
-func getMapOfRealmAndClientRolesFromUser(roleMappings *keycloak.UserRoleMapping) (map[string][]*keycloak.Role, error) {
-	roles := make(map[string][]*keycloak.Role)
-
-	if len(roleMappings.RealmMappings) != 0 {
-		roles["realm"] = roleMappings.RealmMappings
-	}
-
-	for _, clientRoleMapping := range roleMappings.ClientMappings {
-		roles[clientRoleMapping.Id] = clientRoleMapping.Mappings
-	}
-
-	return roles, nil
-}
-
-func addRolesToUser(keycloakClient *keycloak.KeycloakClient, rolesToAdd map[string][]*keycloak.Role, user *keycloak.User) error {
-	if realmRoles, ok := rolesToAdd["realm"]; ok && len(realmRoles) != 0 {
-		err := keycloakClient.AddRealmRolesToUser(user.RealmId, user.Id, realmRoles)
+func addRolesToUser(keycloakClient *keycloak.KeycloakClient, clientRolesToAdd map[string][]*keycloak.Role, realmRolesToAdd []*keycloak.Role, user *keycloak.User) error {
+	if len(realmRolesToAdd) != 0 {
+		err := keycloakClient.AddRealmRolesToUser(user.RealmId, user.Id, realmRolesToAdd)
 		if err != nil {
 			return err
 		}
 	}
 
-	for k, roles := range rolesToAdd {
-		if k == "realm" {
-			continue
-		}
-
+	for k, roles := range clientRolesToAdd {
 		err := keycloakClient.AddClientRolesToUser(user.RealmId, user.Id, k, roles)
 		if err != nil {
 			return err
@@ -79,19 +60,15 @@ func addRolesToUser(keycloakClient *keycloak.KeycloakClient, rolesToAdd map[stri
 	return nil
 }
 
-func removeRolesFromUser(keycloakClient *keycloak.KeycloakClient, rolesToRemove map[string][]*keycloak.Role, user *keycloak.User) error {
-	if realmRoles, ok := rolesToRemove["realm"]; ok && len(realmRoles) != 0 {
-		err := keycloakClient.RemoveRealmRolesFromUser(user.RealmId, user.Id, realmRoles)
+func removeRolesFromUser(keycloakClient *keycloak.KeycloakClient, clientRolesToRemove map[string][]*keycloak.Role, realmRolesToRemove []*keycloak.Role, user *keycloak.User) error {
+	if len(realmRolesToRemove) != 0 {
+		err := keycloakClient.RemoveRealmRolesFromUser(user.RealmId, user.Id, realmRolesToRemove)
 		if err != nil {
 			return err
 		}
 	}
 
-	for k, roles := range rolesToRemove {
-		if k == "realm" {
-			continue
-		}
-
+	for k, roles := range clientRolesToRemove {
 		err := keycloakClient.RemoveClientRolesFromUser(user.RealmId, user.Id, k, roles)
 		if err != nil {
 			return err
@@ -113,7 +90,7 @@ func resourceKeycloakUserRolesCreate(data *schema.ResourceData, meta interface{}
 	}
 
 	roleIds := interfaceSliceToStringSlice(data.Get("role_ids").(*schema.Set).List())
-	tfRoles, err := getMapOfRealmAndClientRoles(keycloakClient, realmId, roleIds)
+	tfRoles, err := getExtendedRoleMapping(keycloakClient, realmId, roleIds)
 	if err != nil {
 		return err
 	}
@@ -121,22 +98,18 @@ func resourceKeycloakUserRolesCreate(data *schema.ResourceData, meta interface{}
 	// get the list of currently assigned roles. Due to default-realm- and client-roles
 	// (e.g. roles of the account-client) this is probably not empty upon resource creation
 	roleMappings, err := keycloakClient.GetUserRoleMappings(realmId, userId)
-	remoteRoles, err := getMapOfRealmAndClientRolesFromUser(roleMappings)
-	if err != nil {
-		return err
-	}
 
 	// sort into roles we need to add and roles we need to remove
-	removeDuplicateRoles(&tfRoles, &remoteRoles)
+	updates := calculateRoleMappingUpdates(tfRoles, roleMappings)
 
 	// add roles
-	err = addRolesToUser(keycloakClient, tfRoles, user)
+	err = addRolesToUser(keycloakClient, updates.clientRolesToAdd, updates.realmRolesToAdd, user)
 	if err != nil {
 		return err
 	}
 
 	// remove roles
-	err = removeRolesFromUser(keycloakClient, remoteRoles, user)
+	err = removeRolesFromUser(keycloakClient, updates.clientRolesToRemove, updates.realmRolesToRemove, user)
 	if err != nil {
 		return err
 	}
@@ -186,28 +159,27 @@ func resourceKeycloakUserRolesUpdate(data *schema.ResourceData, meta interface{}
 	}
 
 	roleIds := interfaceSliceToStringSlice(data.Get("role_ids").(*schema.Set).List())
-	tfRoles, err := getMapOfRealmAndClientRoles(keycloakClient, realmId, roleIds)
+	tfRoles, err := getExtendedRoleMapping(keycloakClient, realmId, roleIds)
 	if err != nil {
 		return err
 	}
 
 	roleMappings, err := keycloakClient.GetUserRoleMappings(realmId, userId)
-	remoteRoles, err := getMapOfRealmAndClientRolesFromUser(roleMappings)
 	if err != nil {
 		return err
 	}
 
-	removeDuplicateRoles(&tfRoles, &remoteRoles)
+	updates := calculateRoleMappingUpdates(tfRoles, roleMappings)
 
 	// `tfRoles` contains all roles that need to be added
 	// `remoteRoles` contains all roles that need to be removed
 
-	err = addRolesToUser(keycloakClient, tfRoles, user)
+	err = addRolesToUser(keycloakClient, updates.clientRolesToAdd, updates.realmRolesToAdd, user)
 	if err != nil {
 		return err
 	}
 
-	err = removeRolesFromUser(keycloakClient, remoteRoles, user)
+	err = removeRolesFromUser(keycloakClient, updates.clientRolesToRemove, updates.realmRolesToRemove, user)
 	if err != nil {
 		return err
 	}
@@ -224,12 +196,12 @@ func resourceKeycloakUserRolesDelete(data *schema.ResourceData, meta interface{}
 	user, err := keycloakClient.GetUser(realmId, userId)
 
 	roleIds := interfaceSliceToStringSlice(data.Get("role_ids").(*schema.Set).List())
-	rolesToRemove, err := getMapOfRealmAndClientRoles(keycloakClient, realmId, roleIds)
+	rolesToRemove, err := getExtendedRoleMapping(keycloakClient, realmId, roleIds)
 	if err != nil {
 		return err
 	}
 
-	err = removeRolesFromUser(keycloakClient, rolesToRemove, user)
+	err = removeRolesFromUser(keycloakClient, rolesToRemove.clientRoles, rolesToRemove.realmRoles, user)
 	if err != nil {
 		return err
 	}
@@ -250,4 +222,64 @@ func resourceKeycloakUserRolesImport(d *schema.ResourceData, _ interface{}) ([]*
 	d.SetId(userRolesId(parts[0], parts[1]))
 
 	return []*schema.ResourceData{d}, nil
+}
+
+// a struct that represents the "desired" state configured via terraform
+type extendedRoleMapping struct {
+	clientRoles map[string][]*keycloak.Role
+	realmRoles  []*keycloak.Role
+}
+
+// given a list or roleIds, query keycloak for role-details to find out if a role is a client-role or a
+// realm-rule (which is required to POST the role-assignment to the correct API-endpoint)
+func getExtendedRoleMapping(keycloakClient *keycloak.KeycloakClient, realmId string, roleIds []string) (*extendedRoleMapping, error) {
+	clientRoles := make(map[string][]*keycloak.Role)
+	var realmRoles []*keycloak.Role
+
+	for _, roleId := range roleIds {
+		role, err := keycloakClient.GetRole(realmId, roleId)
+		if err != nil {
+			return nil, err
+		}
+
+		if role.ClientRole {
+			clientRoles[role.ClientId] = append(clientRoles[role.ClientId], role)
+		} else {
+			realmRoles = append(realmRoles, role)
+		}
+	}
+
+	mapping := extendedRoleMapping{
+		clientRoles: clientRoles,
+		realmRoles:  realmRoles,
+	}
+
+	return &mapping, nil
+}
+
+type terraformRoleMappingUpdates struct {
+	realmRolesToRemove  []*keycloak.Role
+	realmRolesToAdd     []*keycloak.Role
+	clientRolesToRemove map[string][]*keycloak.Role
+	clientRolesToAdd    map[string][]*keycloak.Role
+}
+
+// given the existing roles (queried from keycloak) and the requested roles (via tf)
+// calculate the required updates, i.e. roles to remove and roles to add
+func calculateRoleMappingUpdates(requestedRoles *extendedRoleMapping, existingRoles *keycloak.UserRoleMapping) *terraformRoleMappingUpdates {
+	var realmRolesToRemove []*keycloak.Role
+	var realmRolesToAdd []*keycloak.Role
+	clientRolesToRemove := make(map[string][]*keycloak.Role)
+	clientRolesToAdd := make(map[string][]*keycloak.Role)
+
+	// TODO: implement this
+
+	updates := terraformRoleMappingUpdates{
+		realmRolesToRemove:  realmRolesToRemove,
+		realmRolesToAdd:     realmRolesToAdd,
+		clientRolesToRemove: clientRolesToRemove,
+		clientRolesToAdd:    clientRolesToAdd,
+	}
+
+	return &updates
 }
